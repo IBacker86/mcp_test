@@ -1,28 +1,4 @@
-TrustStrategy acceptingTrustStrategy = (chain, authType) -> true;
+dir "%USERPROFILE%\.m2\repository\com\citi\commons\mafim-u-certs-commons" /b
 
-SSLContext sslContext = SSLContextBuilder.create()
-        .loadKeyMaterial(
-                keyStore,
-                parametrosCyberArk.keyStorePassword().toCharArray())
-        .loadTrustMaterial(
-                null,
-                acceptingTrustStrategy)
-        .build();
 
-var tlsStrategy = ClientTlsStrategyBuilder.create()
-        .setSslContext(sslContext)
-        .setHostnameVerifier(NoopHostnameVerifier.INSTANCE)
-        .buildClassic();
-
-PoolingHttpClientConnectionManager connectionManager =
-        PoolingHttpClientConnectionManagerBuilder.create()
-                .setTlsSocketStrategy(tlsStrategy)
-                .build();
-
-CloseableHttpClient httpClient = HttpClients.custom()
-        .setConnectionManager(connectionManager)
-        .build();
-
-return Feign.builder()
-        .client(new ApacheHttp5Client(httpClient))
-        .target(clientClass, generaRequestCyberArk(parametrosCyberArk));
+dir "%USERPROFILE%\.m2\repository" /s /b | findstr /i "mafim-u-certs-commons"
