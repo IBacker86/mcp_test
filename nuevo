@@ -1,153 +1,28 @@
-import com.banamex.dcmt.dsv.o.account.app.notif.ao.connector.vo.DatabaseConfig;
-import com.banamex.dcmt.dsv.o.account.app.notif.ao.constants.Constants;
-import feign.Feign;
-import feign.hc5.ApacheHttp5Client;
-import java.io.InputStream;
-import java.net.HttpURLConnection;
-import java.net.URI;
-import java.net.URL;
-import java.security.KeyStore;
-import java.security.cert.X509Certificate;
-import javax.net.ssl.SSLContext;
-import lombok.AccessLevel;
-import lombok.NoArgsConstructor;
-import org.apache.hc.client5.http.impl.classic.CloseableHttpClient;
-import org.apache.hc.client5.http.impl.classic.HttpClients;
-import org.apache.hc.client5.http.impl.io.PoolingHttpClientConnectionManager;
-import org.apache.hc.client5.http.impl.io.PoolingHttpClientConnectionManagerBuilder;
-import org.apache.hc.client5.http.ssl.ClientTlsStrategyBuilder;
-import org.apache.hc.client5.http.ssl.NoopHostnameVerifier;
-import org.apache.hc.core5.ssl.SSLContextBuilder;
+TrustStrategy acceptingTrustStrategy = (chain, authType) -> true;
 
-/**
- * Clase que ayuda a las multiples conexiones de cyberark.
- */
-@NoArgsConstructor(access = AccessLevel.PRIVATE)
-public class FeignClientFactory {
+SSLContext sslContext = SSLContextBuilder.create()
+        .loadKeyMaterial(
+                keyStore,
+                parametrosCyberArk.keyStorePassword().toCharArray())
+        .loadTrustMaterial(
+                null,
+                acceptingTrustStrategy)
+        .build();
 
-    /**
-     * Metodo para crear un cliente con una clase generica.
-     *
-     * @param clientClass        Clase a la cual va a castear.
-     * @param parametrosCyberArk datos de la conexion de cyberark.
-     * @param <T>                Clase generica.
-     * @return Clase que se quiere obtener.
-     */
-    public static <T> T createClient(
-            Class<T> clientClass,
-            DatabaseConfig parametrosCyberArk) {
+var tlsStrategy = ClientTlsStrategyBuilder.create()
+        .setSslContext(sslContext)
+        .setHostnameVerifier(NoopHostnameVerifier.INSTANCE)
+        .buildClassic();
 
-        try {
-            URL url = URI.create(
-                    parametrosCyberArk.keyStore()).toURL();
+PoolingHttpClientConnectionManager connectionManager =
+        PoolingHttpClientConnectionManagerBuilder.create()
+                .setTlsSocketStrategy(tlsStrategy)
+                .build();
 
-            HttpURLConnection conn =
-                    (HttpURLConnection) url.openConnection();
+CloseableHttpClient httpClient = HttpClients.custom()
+        .setConnectionManager(connectionManager)
+        .build();
 
-            conn.setRequestMethod(Constants.GET_METHOD);
-            conn.setConnectTimeout(Constants.CONNECT_TIMEOUT);
-            conn.setReadTimeout(Constants.READ_TIMEOUT);
-
-            // Load the JKS keystore
-            KeyStore keyStore = KeyStore.getInstance(
-                    KeyStore.getDefaultType());
-
-            try (InputStream inputStream = conn.getInputStream()) {
-                // Load JKS
-                keyStore.load(
-                        inputStream,
-                        parametrosCyberArk
-                                .keyStorePassword()
-                                .toCharArray());
-            }
-
-            // Trust strategy
-            var acceptingTrustStrategy =
-                    (java.security.cert.X509Certificate[] chain,
-                     String authType) -> true;
-
-            // Build SSL context
-            SSLContext sslContext =
-                    SSLContextBuilder.create()
-                            .loadKeyMaterial(
-                                    keyStore,
-                                    parametrosCyberArk
-                                            .keyStorePassword()
-                                            .toCharArray())
-                            .loadTrustMaterial(
-                                    null,
-                                    acceptingTrustStrategy)
-                            .build();
-
-            // Create TLS strategy
-            var tlsStrategy =
-                    ClientTlsStrategyBuilder.create()
-                            .setSslContext(sslContext)
-                            .setHostnameVerifier(
-                                    NoopHostnameVerifier.INSTANCE)
-                            .build();
-
-            PoolingHttpClientConnectionManager connectionManager =
-                    PoolingHttpClientConnectionManagerBuilder.create()
-                            .setTlsSocketStrategy(tlsStrategy)
-                            .build();
-
-            // Build HttpClient
-            CloseableHttpClient httpClient =
-                    HttpClients.custom()
-                            .setConnectionManager(connectionManager)
-                            .build();
-
-            // Build Feign client
-            return Feign.builder()
-                    .client(new ApacheHttp5Client(httpClient))
-                    .target(
-                            clientClass,
-                            generaRequestCyberArk(
-                                    parametrosCyberArk));
-
-        } catch (Exception e) {
-            throw new IllegalStateException(
-                    Constants.ERROR_CREAR_CLIENTE_FEIGN,
-                    e);
-        }
-    }
-
-    /**
-     * Metodo que se encarga de generar el request.
-     *
-     * @param parametrosCyberArk parametros.
-     * @return request.
-     */
-    private static String generaRequestCyberArk(
-            final DatabaseConfig parametrosCyberArk) {
-
-        StringBuilder request =
-                new StringBuilder(
-                        parametrosCyberArk.urlCyberark());
-
-        request.append(parametrosCyberArk.resource())
-                .append(Constants.SIGNO_INTERROGACION);
-
-        request.append(Constants.APP_ID)
-                .append(Constants.SIGNO_IGUAL);
-
-        request.append(parametrosCyberArk.appId());
-
-        request.append(Constants.SIGNO_AMPERSAND);
-
-        request.append(Constants.SAFE)
-                .append(Constants.SIGNO_IGUAL);
-
-        request.append(parametrosCyberArk.safe());
-
-        request.append(Constants.SIGNO_AMPERSAND);
-
-        request.append(Constants.OBJET)
-                .append(Constants.SIGNO_IGUAL);
-
-        request.append(parametrosCyberArk.object());
-
-        return request.toString();
-    }
-}
+return Feign.builder()
+        .client(new ApacheHttp5Client(httpClient))
+        .target(clientClass, generaRequestCyberArk(parametrosCyberArk));
