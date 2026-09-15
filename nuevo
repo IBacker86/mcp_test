@@ -1,4 +1,458 @@
 dir "%USERPROFILE%\.m2\repository\com\citi\commons\mafim-u-certs-commons" /b
 
 
-dir "%USERPROFILE%\.m2\repository" /s /b | findstr /i "mafim-u-certs-commons"
+dir "%USERPROFILE%\.m2\repository" /s /b | findstr /i "mafim-u-certs-commons";
+
+@Log4j2
+@Service
+@RequiredArgsConstructor
+public class UpdateAccountTransferLimitServiceImpl implements UpdateAccountTransferLimitService {
+
+    private final CatalogService catalogService;
+    private final AccountTransferLimitRepository accountTransferLimitRepository;
+    private final DeviceAccessRepository deviceAccessRepository;
+    private final TmxService tmxService;
+    private final CustomerRepositoryService customerRepositoryService;
+    private final RiskScoreTransactionRequestMapper riskScoreTransactionRequestMapper;
+    private final PreAuthService preAuthService;
+    private final EventHubService eventHubService;
+    private final MessagingService messagingService;
+    private final TmxProperties tmxProperties;
+
+    // ================================================================
+    // MÉTODO PRINCIPAL updateData (CON LOS CAMBIOS APLICADOS)
+    // ================================================================
+    @Override
+    public Optional<UpdateAccountTransferLimitResponse> updateData(
+            HttpHeaders headers,
+            UpdateAccountTransferLimitRequest request) {
+
+        LoggerUtilities.logConstantMessage(AccountTransferLimitConstants.UPDATE_PROCESS_START);
+        LoggerUtilities.logUpdateRequest(request);
+
+        // Formatear número de cuenta
+        request.getCustomer().getAccount()
+                .setAccountNumber(
+                        formatValidAccountNumber(request.getCustomer().getAccount())
+                                .getAccountNumber());
+
+        // Preparar headers como Map
+        Map<String, String> headersMap = fixHeaders(headers);
+        Long accountNumber = Long.parseLong(request.getCustomer().getAccount().getAccountNumber());
+        Long customerIdNumber = Long.parseLong(request.getCustomer().getCustomerId());
+
+        // Buscar cuenta en BD
+        Optional<List<Accounts>> optionalAccounts = accountTransferLimitRepository
+                .findByAccountNumberAndCustomerIdOrderByCreationDateDesc(accountNumber, customerIdNumber);
+
+        List<Accounts> accountsList = optionalAccounts.orElse(Collections.emptyList());
+        Optional<Accounts> accounts;
+        if (accountsList.isEmpty()) {
+            accounts = Optional.empty();
+        } else {
+            accounts = accountsList.stream().findFirst();
+        }
+
+        String token = request.getCustomer().getAccount().getTransferLimit().getHashTransferLimitApproved();
+
+        if (accounts.isEmpty()) {
+            throw new NotFoundException(AccountTransferLimitConstants.ACCOUNT_NUMBER_NOT_LOCATED_IN_DB,
+                    AccountTransferLimitConstants.ACCOUNT_NUMBER_NOT_LOCATED_IN_DB);
+        }
+
+        Accounts accountCurrent = accounts.get();
+        final BigDecimal previousLimitAmount = accountCurrent.getTransferLimitAmount()
+                .setScale(Constants.TWO, RoundingMode.DOWN);
+
+        // ================================================================
+        // ⚠️ CAMBIO 1: BLOQUE DE SEGURIDAD (Pre-Authorization y TMX)
+        // Ahora usa el método validateChannelIdPreauth (sin el OR de ACCOPD)
+        // ================================================================
+        if (validateChannelIdPreauth(headersMap, request)) {   // <-- ANTES: validateChannelId
+            // Validar Pre Authorization
+            StringBuilder sb = new StringBuilder(Constants.INITIAL_CAPACITY);
+            sb.append(token)
+                    .append(Constants.TWO_POINTS)
+                    .append(request.getCustomer().getCustomerId());
+            String encodedToken = Base64.getEncoder()
+                    .encodeToString(sb.toString().getBytes(StandardCharsets.UTF_8));
+            validatePreAuthorization(headersMap, encodedToken);
+
+            // Enviar a TMX
+            sendTransactionRisk(Context.builder()
+                    .headers(headersMap)
+                    .updateRequest(request)
+                    .previousLimit(previousLimitAmount)
+                    .build());
+        }
+
+        BigDecimal transferLimitAmount = request.getCustomer().getAccount().getTransferLimit().getLimitAmount();
+        Accounts updatedAccount = updateAccount(accountCurrent, transferLimitAmount);
+
+        ArrayList<AccountMediaAccess> requestAccountMedia = request.getCustomer()
+                .getAccount().getAccountMediaAccess();
+        ArrayList<AccountMediaAccess> updatedAccountMedia = new ArrayList<>(Constants.INITIAL_CAPACITY);
+        if (requestAccountMedia != null) {
+            updatedAccountMedia = updateDeviceAccessByAccountMedia(updatedAccount,
+                    requestAccountMedia, headersMap.get(Constants.CHANNEL_ID));
+        }
+
+        // Obtener datos adicionales para EventHub y notificaciones
+        String customerId = request.getCustomer().getCustomerId();
+        String accountNumberData;
+        Optional<CustomerRepository> customerRepository =
+                java.util.Optional.ofNullable(
+                        customerRepositoryService.retrieveAccounts(headers, customerId));
+        String deviceAccessPrefix;
+
+        if (customerRepository.isPresent()) {
+            accountNumberData = CommonAccountMapper.getAccountNumberUpdate(
+                    customerRepository.get(), request);
+            deviceAccessPrefix = getDeviceAccessPrefix(request, customerRepository.get());
+            request.getCustomer().getAccount().setProductName(
+                    getProductName(request, customerRepository.get()));
+        } else {
+            accountNumberData = request.getCustomer().getAccount().getAccountNumber();
+            deviceAccessPrefix = getDefaultDeviceAccessPrefix(request
+                    .getCustomer().getAccount().getAccountNumber());
+        }
+
+        // Enviar evento de actualización de MTU
+        String messageId = getMessageId();
+        eventHubService.sendEventUpdateTransferLimitAmount(headers,
+                UtilsModelEventsMapper.updateTransferLimitAmountPayloadMapper(headers, request,
+                        previousLimitAmount, messageId, accountNumberData));
+        LoggerUtilities.logConstantMessage(AccountTransferLimitConstants.EVENT_SENT_UPDATE_MTU);
+
+        // ================================================================
+        // ⚠️ CAMBIO 2: BLOQUE DE NOTIFICACIONES
+        // Ahora usa el método validateChannelIdNotifications (incluye OR con ACCOPD-BRANCHES)
+        // ================================================================
+        if (validateChannelIdNotifications(headersMap, request)) {   // <-- ANTES: validateChannelId || ...
+            messagingService.sendNotification(headersMap, request, messageId,
+                    previousLimitAmount, deviceAccessPrefix);
+        }
+
+        return Optional.of(UpdateAccountTransferLimitResponse
+                .builder()
+                .account(createUpdateAccount(request, updatedAccount, updatedAccountMedia))
+                .build());
+    }
+
+    // ================================================================
+    // ⚠️ CAMBIO 3: MÉTODO ORIGINAL RENOMBRADO Y DEPURADO (solo seguridad)
+    // ================================================================
+    /**
+     * Valida si el canal requiere Pre-Authorization y TMX.
+     * Retorna true solo para canal MBK que NO sea One Click.
+     * <p>
+     * Esta lógica NO debe modificarse para evitar afectar la seguridad.
+     * </p>
+     */
+    private boolean validateChannelIdPreauth(Map<String, String> headers,
+                                             UpdateAccountTransferLimitRequest request) {
+        if (Constants.MBK.equals(headers.get(Constants.CHANNEL_ID)) &&
+            request.getCustomer().getAccount().getTransferLimit().getChannelOrigin()
+                    .equalsIgnoreCase(Constants.CHANNEL_ID_OC)) {
+            return false;
+        } else {
+            return Constants.MBK.equals(headers.get(Constants.CHANNEL_ID));
+        }
+    }
+
+    // ================================================================
+    // ⚠️ CAMBIO 4: NUEVO MÉTODO PARA NOTIFICACIONES (con la nueva condición)
+    // ================================================================
+    /**
+     * Valida si se debe enviar la notificación.
+     * <p>
+     * Retorna true si se cumple ALGUNA de las siguientes condiciones:
+     * <ul>
+     *   <li>El canal es MBK y no es One Click (requiere seguridad)</li>
+     *   <li>El origen del canal es ACCOPD-BRANCHES (operación desde sucursal)</li>
+     * </ul>
+     * </p>
+     */
+    private boolean validateChannelIdNotifications(Map<String, String> headers,
+                                                   UpdateAccountTransferLimitRequest request) {
+        // Reutilizamos la lógica de seguridad (no la duplicamos)
+        boolean isMbkRequiresSecurity = validateChannelIdPreauth(headers, request);
+
+        // Nueva condición para sucursales físicas
+        boolean isAcoppBranches = request.getCustomer()
+                                         .getAccount()
+                                         .getTransferLimit()
+                                         .getChannelOrigin()
+                                         .equals("ACCOPD-BRANCHES");
+
+        return isMbkRequiresSecurity || isAcoppBranches;
+    }
+
+    // ================================================================
+    // MÉTODOS PRIVADOS EXISTENTES (sin cambios)
+    // ================================================================
+
+    private void validatePreAuthorization(Map<String, String> headers, String token) {
+        RetrieveCustomerPreAuthorizationResponse response = preAuthService.retrievePreAuth(headers, token);
+
+        Set<Integer> authorization = response
+                .getCustomerPreAuthorizationDetails()
+                .stream()
+                .map(CustomerPreAuthorizationDetail::getCustomerPreAuthorizationId)
+                .collect(Collectors.toSet());
+
+        if (authorization.size() == AccountTransferLimitConstants.MIN_PREAUTH_FOR_PERMANENT &&
+            (authorization.stream().anyMatch(id -> Objects.equals(id, Constants.PRE_AUTHORIZATION_NETKEY)) &&
+             authorization.stream().anyMatch(id -> Objects.equals(id, Constants.PRE_AUTHORIZATION_PASSWORD)) ||
+             authorization.stream().anyMatch(id -> Objects.equals(id, Constants.PRE_AUTHORIZATION_BIOMETRICS)))) {
+
+            log.debug(Constants.PREAUTH_PERMANENT_COMPLETED);
+        } else {
+            log.error(HttpStatus.INTERNAL_SERVER_ERROR.getReasonPhrase());
+            throw new BadRequestException(AccountTransferLimitConstants.CUSTOMER_INCOMPLETE_PREAUTH_ERROR,
+                    AccountTransferLimitConstants.CUSTOMER_INCOMPLETE_PREAUTH_ERROR);
+        }
+    }
+
+    private void sendTransactionRisk(Context context) {
+        LoggerUtilities.logConstantMessage(AccountTransferLimitConstants.SEND_RISK_TMX);
+        CatalogQueriesResponse catalogQueriesResponse = catalogService.updateCatalogs();
+        if (catalogQueriesResponse != null) {
+            String rsa = catalogQueriesResponse.getData().get(Constants.ZERO).getRsA();
+            String transactionId = catalogQueriesResponse.getData().get(Constants.ZERO).getTxnId();
+
+            if (rsa != null && rsa.equalsIgnoreCase(Constants.FOUR_STRING) &&
+                tmxProperties.getTransactionId().equalsIgnoreCase(transactionId)) {
+                LoggerUtilities.logConstantMessage(AccountTransferLimitConstants.TMX_ATTEMPT_REQUEST);
+                RiskScoreTransactionRequest riskScoreTransactionRequest =
+                        riskScoreTransactionRequestMapper.generateTmxRequest(context);
+                LoggerUtilities.logTmxRequest(riskScoreTransactionRequest);
+
+                try {
+                    tmxService.riskAnalysis(context.getHeaders(), riskScoreTransactionRequest);
+                    LoggerUtilities.logTmxResponse(null);
+                } catch (Exception e) {
+                    LoggerUtilities.logErrorTmx(e);
+                }
+            }
+        }
+    }
+
+    private Accounts updateAccount(Accounts accountCurrent, BigDecimal transferLimitAmount) {
+        accountCurrent.setTransferLimitAmount(transferLimitAmount);
+        accountCurrent.setLastUpdateDate(LocalDateTime.now());
+        accountCurrent.setIsDefault('1');
+        Accounts newAccount = accountTransferLimitRepository.save(accountCurrent);
+        LoggerUtilities.logConstantMessage(AccountTransferLimitConstants.ACCOUNT_FOUND_AND_UPDATED);
+        return newAccount;
+    }
+
+    private ArrayList<AccountMediaAccess> updateDeviceAccessByAccountMedia(
+            Accounts accountCurrent,
+            ArrayList<AccountMediaAccess> requestAccountMedia,
+            String channelId) {
+
+        ArrayList<AccountMediaAccess> newAccountMedia = new ArrayList<>(Constants.INITIAL_CAPACITY);
+        Optional<ArrayList<DeviceAccess>> deviceAccessList =
+                deviceAccessRepository.findByAccountNumber(accountCurrent.getAccountNumber());
+
+        requestAccountMedia.forEach(accountMediaAccess -> {
+            Optional<DeviceAccess> deviceDb = Optional.empty();
+            if (deviceAccessList.isPresent()) {
+                deviceDb = deviceAccessList.get().stream()
+                        .filter(da -> da.getDeviceAccessNumber() == Long.parseLong(
+                                accountMediaAccess.getDeviceAccessId()))
+                        .findFirst();
+            }
+
+            if (deviceDb.isPresent()) {
+                LoggerUtilities.logConstantMessage(AccountTransferLimitConstants.DEVICE_FOUND_IN_DB);
+                newAccountMedia.add(saveDeviceAccess(deviceDb.get(), accountMediaAccess));
+            } else {
+                LoggerUtilities.logConstantMessage(AccountTransferLimitConstants.DEVICE_NOT_FOUND_IN_DB);
+                newAccountMedia.add(saveNewDeviceAccess(accountCurrent, accountMediaAccess, channelId));
+            }
+        });
+
+        return newAccountMedia;
+    }
+
+    private AccountMediaAccess saveDeviceAccess(DeviceAccess deviceAccessDb, AccountMediaAccess accountMediaAccess) {
+        DeviceAccess updateDevice = DeviceAccess.builder()
+                .deviceAccessId(deviceAccessDb.getDeviceAccessId())
+                .accountId(deviceAccessDb.getAccountId())
+                .accountNumber(deviceAccessDb.getAccountNumber())
+                .deviceAccessNumber(Long.parseLong(accountMediaAccess.getDeviceAccessId()))
+                .customerId(deviceAccessDb.getCustomerId())
+                .lastUpdateDate(LocalDateTime.now())
+                .build();
+        LoggerUtilities.logUpdateAccount();
+        deviceAccessRepository.save(updateDevice);
+        return AccountMediaAccess.builder()
+                .deviceAccessId(String.valueOf(updateDevice.getDeviceAccessNumber()))
+                .bankIdentificationNumber(AccountTransferLimitConstants.BANK_IDENTIFICATION_DEFAULT)
+                .build();
+    }
+
+    private AccountMediaAccess saveNewDeviceAccess(
+            Accounts accountCurrent,
+            AccountMediaAccess accountMediaAccess,
+            String channelId) {
+
+        LocalDateTime time = LocalDateTime.now();
+        DeviceAccess updateDevice = DeviceAccess.builder()
+                .accountId(accountCurrent.getAccountId())
+                .accountNumber(accountCurrent.getAccountNumber())
+                .deviceAccessNumber(Long.parseLong(accountMediaAccess.getDeviceAccessId()))
+                .customerId(accountCurrent.getCustomerId())
+                .creationDate(time)
+                .creationChannel(fixChannelId(channelId))
+                .lastUpdateDate(time)
+                .build();
+        LoggerUtilities.logUpdateAccount();
+        deviceAccessRepository.save(updateDevice);
+        return AccountMediaAccess.builder()
+                .deviceAccessId(String.valueOf(updateDevice.getDeviceAccessNumber()))
+                .bankIdentificationNumber(AccountTransferLimitConstants.BANK_IDENTIFICATION_DEFAULT)
+                .build();
+    }
+
+    private Account createUpdateAccount(
+            UpdateAccountTransferLimitRequest request,
+            Accounts accountCurrent,
+            ArrayList<AccountMediaAccess> updatedAccountMedia) {
+
+        return Account.builder()
+                .accountId(request.getCustomer().getAccount().getAccountId())
+                .accountNumber(request.getCustomer().getAccount().getAccountNumber())
+                .accountType(request.getCustomer().getAccount().getAccountType())
+                .productCode(request.getCustomer().getAccount().getProductCode())
+                .productName(request.getCustomer().getAccount().getProductName())
+                .productInstrument(request.getCustomer().getAccount().getProductInstrument())
+                .currencyCode(request.getCustomer().getAccount().getCurrencyCode())
+                .branchId(request.getCustomer().getAccount().getBranchId())
+                .accountMediaAccess(updatedAccountMedia)
+                .transferLimit(TransferLimit.builder()
+                        .lastUpdateDate(accountCurrent.getLastUpdateDate())
+                        .limitAmount(accountCurrent.getTransferLimitAmount())
+                        .defaultLimitAmountFlag(ResponseToMapUtilities.convertDefaultFlag(
+                                accountCurrent.getIsDefault()))
+                        .channelOrigin(accountCurrent.getCreationChannel())
+                        .hashTransferLimitApproved(request
+                                .getCustomer()
+                                .getAccount()
+                                .getTransferLimit()
+                                .getHashTransferLimitApproved())
+                        .build())
+                .build();
+    }
+
+    // ================================================================
+    // MÉTODOS AUXILIARES (sin cambios)
+    // ================================================================
+
+    private Map<String, String> fixHeaders(HttpHeaders headers) {
+        return headers.toSingleValueMap();
+    }
+
+    private String formatValidAccountNumber(Account account) {
+        return account;
+    }
+
+    private String fixChannelId(String channelId) {
+        return channelId;
+    }
+
+    private static String getMessageId() {
+        LocalDateTime timeNow = LocalDateTime.now();
+        return ConstantsNotification.TEMPLATE_ID_AJUSTE_TRANSACCIONAL +
+                timeNow.format(Constants.DATE_TIME_FORMAT_MESSAGE_ID);
+    }
+
+    private String getDeviceAccessPrefix(UpdateAccountTransferLimitRequest request,
+                                         CustomerRepository customerRepository) {
+        Optional<CommonAccount> commonAccount = findCommonAccount(request, customerRepository);
+        if (commonAccount.isPresent()) {
+            return getDeviceAccessPrefixByCommonAccount(commonAccount.get());
+        } else {
+            return getDefaultDeviceAccessPrefix(request.getCustomer().getAccount().getAccountNumber());
+        }
+    }
+
+    private String getDefaultDeviceAccessPrefix(String accountNumber) {
+        if (accountNumber.length() < Constants.MAX_ACCOUNT_CHARACTERS) {
+            return Constants.DEFAULT_BIN;
+        } else {
+            return Constants.DEFAULT_DEVICE_ACCESS_PREFIX;
+        }
+    }
+
+    private String getProductName(UpdateAccountTransferLimitRequest request,
+                                  CustomerRepository customerRepository) {
+        Optional<CommonAccount> commonAccount = findCommonAccount(request, customerRepository);
+        if (commonAccount.isPresent()) {
+            return getProductNameByCommonAccount(commonAccount.get());
+        } else {
+            return request.getCustomer().getAccount().getProductName();
+        }
+    }
+
+    private static Optional<CommonAccount> findCommonAccount(
+            UpdateAccountTransferLimitRequest request,
+            CustomerRepository customerRepository) {
+        final Long sourceSearch = Long.parseLong(request.getCustomer().getAccount().getAccountNumber());
+        return customerRepository.getAccounts().stream()
+                .filter(account -> account.getAccountNumber().equals(sourceSearch.toString()) ||
+                        (account.getDeviceAccessData() != null &&
+                         account.getDeviceAccessData().stream()
+                                 .anyMatch(da -> da.getDeviceAccessId().equals(sourceSearch.toString()))))
+                .findFirst();
+    }
+
+    private String getDeviceAccessPrefixByCommonAccount(CommonAccount commonAccount) {
+        int accountType = 0;
+        if (commonAccount.getAccountType() != null) {
+            accountType = commonAccount.getAccountType();
+        }
+        boolean existDeviceAccessData = commonAccount.getDeviceAccessData() != null &&
+                !commonAccount.getDeviceAccessData().isEmpty();
+
+        if (accountType == Constants.ONE || accountType == Constants.SIX || !existDeviceAccessData) {
+            return commonAccount.getAccountAccessPrefix();
+        } else {
+            CommonDeviceAccess commonDeviceAccess = commonAccount.getDeviceAccessData().stream()
+                    .filter(this::validCardHolderType)
+                    .findFirst()
+                    .orElse(null);
+            return commonDeviceAccess != null ?
+                    commonDeviceAccess.getDeviceAccessPrefix() :
+                    commonAccount.getAccountAccessPrefix();
+        }
+    }
+
+    private String getProductNameByCommonAccount(CommonAccount commonAccount) {
+        int accountType = 0;
+        if (commonAccount.getAccountType() != null) {
+            accountType = commonAccount.getAccountType();
+        }
+        boolean existDeviceAccessData = commonAccount.getDeviceAccessData() != null &&
+                !commonAccount.getDeviceAccessData().isEmpty();
+
+        if (accountType == Constants.ONE || accountType == Constants.SIX || !existDeviceAccessData) {
+            return commonAccount.getProductName();
+        } else {
+            CommonDeviceAccess commonDeviceAccess = commonAccount.getDeviceAccessData().stream()
+                    .filter(this::validCardHolderType)
+                    .findFirst()
+                    .orElse(null);
+            return commonDeviceAccess != null ?
+                    commonDeviceAccess.getProductName() :
+                    commonAccount.getProductName();
+        }
+    }
+
+    private boolean validCardHolderType(CommonDeviceAccess commonDeviceAccess) {
+        return commonDeviceAccess != null &&
+                commonDeviceAccess.getCardHolderType().equalsIgnoreCase(Constants.PRIMARY);
+    }
+}
