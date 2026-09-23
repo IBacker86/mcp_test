@@ -1,0 +1,93 @@
+
+
+1. EXPDIG_TRAMITE
+
+Aparece en múltiples funciones:
+
+· FN_CONSULTA_TRAMITES_PENDIENTES:
+  ```sql
+  FROM C302_110_DBO_04.EXPDIG_TRAMITE T
+  ```
+· FN_CONSULTA_TRAMITE:
+  ```sql
+  FROM C302_110_DBO_04.EXPDIG_TRAMITE
+  ```
+· FN_ACTUALIZA_TRAMITE_PROCESADO:
+  ```sql
+  UPDATE C302_110_DBO_04.EXPDIG_TRAMITE SET ID_ESTATUS = 40
+  ```
+· FN_TRAMITES_PENDIENTES_INTEROPERABILIDAD:
+  ```sql
+  FROM C302_110_DBO_04.EXPDIG_TRAMITE ET
+  ```
+
+2. EXPDIG_DOCUMENTO_TRAMITE
+
+Aparece en:
+
+· FN_CONSULTA_TRAMITES_PENDIENTES (subconsulta):
+  ```sql
+  (SELECT COUNT(0) FROM C302_110_DBO_04.EXPDIG_DOCUMENTO_TRAMITE D WHERE T.ID_TRAMITE = D.ID_TRAMITE)
+  ```
+· FN_DOCUMENTOS_TRAMITE_INTEROPERABILIDAD:
+  ```sql
+  FROM C302_110_DBO_04.EXPDIG_DOCUMENTO_TRAMITE EDT
+  ```
+
+3. AO_DOCUMENTO_EXPEDIENTE
+
+Aparece en:
+
+· FN_CONSULTA_DOCUMENTO:
+  ```sql
+  FROM C302_110_DBO_04.AO_DOCUMENTO_EXPEDIENTE DOCEXP
+  ```
+· FN_ACTUALIZA_DOCUMENTO_DEPURADO_COS:
+  ```sql
+  UPDATE C302_110_DBO_04.AO_DOCUMENTO_EXPEDIENTE SET FECHA_DEPURACION = SYSDATE
+  ```
+
+4. AO_CLIENTE_ROL_EXP
+
+Aparece en:
+
+· FN_CONSULTA_DOCUMENTO (JOIN):
+  ```sql
+  INNER JOIN C302_110_DBO_04.AO_CLIENTE_ROL_EXP CRE ON DOCEXP.ID_CLIENTE_ROL_EXP = CRE.ID_CLIENTE_ROL_EXP
+  ```
+
+5. AO_EXPEDIENTE
+
+Aparece en:
+
+· FN_CONSULTA_DOCUMENTO (JOIN):
+  ```sql
+  INNER JOIN C302_110_DBO_04.AO_EXPEDIENTE EXP ON CRE.ID_EXPEDIENTE = EXP.ID_EXPEDIENTE
+  ```
+
+.
+
+Respuesta sugerida para Gerardo:
+
+---
+
+Hola Gerardo, buen día.
+
+Revisando los scripts y el código del micro, te confirmo lo siguiente respecto a las tablas:
+
+Todas son necesaria previamente las funciones que las utilizan.
+
+Detalle por tabla:
+
+Tabla ¿Necesaria? Funciones que la usan
+EXPDIG_TRAMITE ✅ Sí FN_CONSULTA_TRAMITES_PENDIENTES, FN_CONSULTA_TRAMITE, FN_ACTUALIZA_TRAMITE_PROCESADO, FN_TRAMITES_PENDIENTES_INTEROPERABILIDAD
+EXPDIG_DOCUMENTO_TRAMITE ✅ Sí FN_CONSULTA_TRAMITES_PENDIENTES, FN_DOCUMENTOS_TRAMITE_INTEROPERABILIDAD
+AO_DOCUMENTO_EXPEDIENTE ✅ Sí FN_CONSULTA_DOCUMENTO, FN_ACTUALIZA_DOCUMENTO_DEPURADO_COS
+AO_CLIENTE_ROL_EXP ✅ Sí FN_CONSULTA_DOCUMENTO (JOIN)
+AO_EXPEDIENTE ✅ Sí FN_CONSULTA_DOCUMENTO (JOIN)
+
+Observaciones importantes:
+
+1. EXPDIG_TRAMITE y EXPDIG_DOCUMENTO_TRAMITE son el núcleo del flujo de resiliencia. Sin ellas, no se pueden obtener los trámites pendientes ni sus documentos, por lo que no se pueden eliminar.
+2. Las tablas AO_* son utilizadas exclusivamente por las funciones FN_CONSULTA_DOCUMENTO y FN_ACTUALIZA_DOCUMENTO_DEPURADO_COS. Si el alcance del proyecto no requiere esas funciones, se podrían eliminar junto con ellas. Pero si se mantienen las funciones, las tablas son obligatorias.
+
