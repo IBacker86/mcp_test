@@ -1,36 +1,49 @@
-# mcp_test
-
-mvn dependency:tree -Dverbose \
 
 
-  
-SSLContext sslContext = SSLContextBuilder.create()
-        .loadKeyMaterial(
-                keyStore,
-                parametrosCyberArk.keyStorePassword().toCharArray()
-        )
-        .loadTrustMaterial(null, (chain, authType) -> true)
-        .build();
+1. En el método testTransformWithAlternativeStrategy (Imagen 6)
 
-var tlsStrategy = ClientTlsStrategyBuilder.create()
-        .setSslContext(sslContext)
-        .setHostnameVerifier(NoopHostnameVerifier.INSTANCE)
-        .build();
+```java
+    // CAMBIO AQUÍ: Reemplaza la concatenación por Text Block
+    String jsonInput = """
+        {
+         "applicationReferenceNumber": "REF-456",
+         "applicationFiles": [
+          {
+           "fileMetadata": { "documentType": "cbfIdentification", "customerId": "CUST-2", "curp": "CURP123456" },
+           "documentInfo": { "documentStoragePath": "/storage/id.pdf", "fileName": "id.pdf" }
+          }
+         ]
+        }
+        """;
+```
 
+2. En el método testTransformArrayWithStrategies (Imagen 7)
 
-return Feign.builder()
-        .client(new ApacheHttp5Client(httpClient))
-        .target(clientClass, generaRequestCyberArk(parametrosCyberArk));
+```java
+    // CAMBIO AQUÍ: Reemplaza la concatenación por Text Block
+    String jsonInput = """
+        {
+         "applicationReferenceNumber": "REF-999",
+         "applicationFiles": [
+          {
+           "fileMetadata": { "documentType": "cbfVotingCard", "customerId": "CUST-1", "curr": "MXN", "documentExpirationDate": "2030-01-01", "documentStatus": "ACTIVE" },
+           "documentInfo": { "documentStoragePath": "/storage/ine.pdf", "fileName": "ine.pdf" }
+          }
+         ]
+        }
+        """;
+```
 
-var connectionManager = org.apache.hc.client5.http.impl.io.PoolingHttpClientConnectionManagerBuilder
-        .create()
-        .setTlsSocketStrategy(tlsStrategy)
-        .build();
+3. En el método testTransformConcurrentWithExecutorService (Imagen 11)
 
-CloseableHttpClient httpClient = HttpClients.custom()
-        .setConnectionManager(connectionManager)
-        .build();
-
-
-
+```java
+    // CAMBIO AQUÍ: Reemplaza la concatenación por Text Block
+    String jsonInput = """
+        {
+         "applicationReferenceNumber": "REF-CONCURRENT",
+         "applicationFiles": [
+          { "fileMetadata": { "documentType": "cbfPassport", "customerId": "CUST-X", "curp": "CURPX" }, "documentInfo": { "documentStoragePath": "/p.pdf", "fileName": "p.pdf" } }
+         ]
+        }
+        """;
 
