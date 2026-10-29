@@ -1,0 +1,15 @@
+1. Sesión de revisión con Equipo Platino
+Hallazgos
+Durante la sesión de la mañana, el equipo de AO realizó la revisión del flujo y detectó que la función encargada de actualizar el estatus de 20 a 40 dentro de la transacción de los payloads no está siendo invocada correctamente.
+Como consecuencia, las solicitudes no completan el flujo esperado y permanecen encoladas dentro de la base de datos.
+Acuerdos
+El equipo de Platino realizará los ajustes correspondientes para asegurar la correcta ejecución de la función de actualización de estatus y restablecer el flujo operativo esperado.
+2. Sesiones de soporte con Equipo Neo
+Actividades realizadas
+Se llevaron a cabo dos sesiones de una hora cada una con el equipo de Neo para la ejecución de pruebas y validación del registro correcto de los requests en los logs.
+Durante las pruebas se identificó que algunos requests estaban siendo enviados con datos incorrectos.
+Se brindó acompañamiento técnico por parte de Yoshimar y Obed Iván Bacquerie Moreno para la construcción y generación correcta de los requests.
+Se realizaron nuevas validaciones posteriores a las correcciones efectuadas.
+Resultados
+Se verificó la correcta visualización y registro de los requests en los logs.
+Las pruebas concluyeron satisfactoriamente al finalizar la jornada, obteniendo resultados exitosos.
